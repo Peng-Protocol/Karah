@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.1 (27/10/2025)
+// File Version: 0.0.2 (27/10/2025)
 // Changelog:
 // - 27/10/2025: Initial implementation of Karah lease contract with subscription, manual renewal, and refund logic.
+// - 27/10/2025: Removed ownership transfer in endLease and subscribe; only reclaimName returns ownership to lessor.
 
 interface IENS {
     function setOwner(bytes32 node, address owner) external;
@@ -101,35 +102,35 @@ contract Karah {
     }
 
     function subscribe(bytes32 node, uint256 durationDays) external {
-        // Subscribes to a lease, transferring tokens and setting lessee
-        require(leases[node].currentToken != address(0), "No terms set");
-        require(leases[node].lessee == address(0), "Already leased");
-        require(durationDays > 0, "Invalid days");
-        uint256 cost = durationDays * leases[node].currentUnitCost;
-        uint8 decimals = IERC20(leases[node].currentToken).decimals();
-        cost = cost * (10 ** uint256(decimals));
-        uint256 balanceBefore = IERC20(leases[node].currentToken).balanceOf(address(this));
-        require(IERC20(leases[node].currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
-        uint256 balanceAfter = IERC20(leases[node].currentToken).balanceOf(address(this));
-        require(balanceAfter - balanceBefore >= cost, "Insufficient transfer");
-        withdrawable[leases[node].lessor] += cost;
-        leases[node].lessee = msg.sender;
-        leases[node].totalDuration = durationDays;
-        leases[node].unitCost = leases[node].currentUnitCost;
-        leases[node].token = leases[node].currentToken;
-        leases[node].startTimestamp = block.timestamp;
-        leaseNodes.push(node);
-        nodeToLeaseNodesIndex[node] = leaseNodes.length - 1;
-        lessorLeases[leases[node].lessor][node] = true;
-        lesseeLeases[msg.sender][node] = true;
-        lessorNodes.push(node);
-        nodeToLessorNodesIndex[node] = lessorNodes.length - 1;
-        lesseeNodes.push(node);
-        nodeToLesseeNodesIndex[node] = lesseeNodes.length - 1;
-        leaseCount++;
-        IENS(ensRegistry).setOwner(node, address(this));
-        emit Subscribed(node, msg.sender, durationDays);
-    }
+    // Changelog: 27/10/2025: Removed IENS.setOwner as contract already owns node.
+    // Subscribes to a lease, transferring tokens and setting lessee
+    require(leases[node].currentToken != address(0), "No terms set");
+    require(leases[node].lessee == address(0), "Already leased");
+    require(durationDays > 0, "Invalid days");
+    uint256 cost = durationDays * leases[node].currentUnitCost;
+    uint8 decimals = IERC20(leases[node].currentToken).decimals();
+    cost = cost * (10 ** uint256(decimals));
+    uint256 balanceBefore = IERC20(leases[node].currentToken).balanceOf(address(this));
+    require(IERC20(leases[node].currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
+    uint256 balanceAfter = IERC20(leases[node].currentToken).balanceOf(address(this));
+    require(balanceAfter - balanceBefore >= cost, "Insufficient transfer");
+    withdrawable[leases[node].lessor] += cost;
+    leases[node].lessee = msg.sender;
+    leases[node].totalDuration = durationDays;
+    leases[node].unitCost = leases[node].currentUnitCost;
+    leases[node].token = leases[node].currentToken;
+    leases[node].startTimestamp = block.timestamp;
+    leaseNodes.push(node);
+    nodeToLeaseNodesIndex[node] = leaseNodes.length - 1;
+    lessorLeases[leases[node].lessor][node] = true;
+    lesseeLeases[msg.sender][node] = true;
+    lessorNodes.push(node);
+    nodeToLessorNodesIndex[node] = lessorNodes.length - 1;
+    lesseeNodes.push(node);
+    nodeToLesseeNodesIndex[node] = lesseeNodes.length - 1;
+    leaseCount++;
+    emit Subscribed(node, msg.sender, durationDays);
+}
 
     function renew(bytes32 node, uint256 renewalDays) external {
         // Renews an existing lease, extending duration
@@ -200,13 +201,21 @@ function _updateLeaseState(bytes32 node, uint256 refund) private {
 }
 
 function endLease(bytes32 node) external {
-    // Changelog: 27/10/2025: Refactored into helpers to fix stack-too-deep error.
-    // Ends a lease, refunds unused days, and returns ENS ownership
+    // Changelog: 27/10/2025: Removed IENS.setOwner to prevent unnecessary  ownership transfer.
+    // Ends a lease, refunds unused days, keeps ENS ownership with contract
     require(leases[node].lessee == msg.sender, "Not lessee");
     EndLeaseData memory data = _calculateRefund(node);
     require(data.refund <= data.available, "Insufficient withdrawable");
     _updateArrays(node);
-    _updateLeaseState(node, data.refund);
+    withdrawable[leases[node].lessor] -= data.refund;
+    leases[node].lessee = address(0);
+    leases[node].totalDuration = 0;
+    lessorLeases[leases[node].lessor][node] = false;
+    lesseeLeases[msg.sender][node] = false;
+    leaseCount--;
+    if (data.refund > 0) {
+        require(IERC20(leases[node].token).transfer(msg.sender, data.refund), "Refund failed");
+    }
     emit Ended(node, data.refund);
 }
 
