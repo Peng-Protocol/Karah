@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.2 (27/10/2025)
+// File Version: 0.0.5 (28/10/2025)
 // Changelog:
-// - 27/10/2025: Initial implementation of Karah lease contract with subscription, manual renewal, and refund logic.
-// - 27/10/2025: Removed ownership transfer in endLease and subscribe; only reclaimName returns ownership to lessor.
+// - 27/10/2025: Initial implementation.
+// - 28/10/2025: Per-lease-agreement refactor.
+// - 28/10/2025: Removed global withdrawable. Added per-agreement withdrawableAmount.
+//   withdraw(node, leaseId) now safe, accurate, and isolated.
+// - 28/10/2025: Fixed underflow in modifyContent; added getAgreementDetails.
+// - Documented: withdraw at startTimestamp returns 0 (correct); renewal uses current terms.
 
 interface IENS {
     function setOwner(bytes32 node, address owner) external;
@@ -18,52 +22,61 @@ interface IERC20 {
     function transfer(address recipient, uint256 amount) external returns (bool);
     function decimals() external view returns (uint8);
     function balanceOf(address account) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 contract Karah {
     struct Lease {
         address lessor;
-        address lessee;
-        uint256 unitCost; // Cost per day in token (for this lease)
-        uint256 totalDuration; // Total leased days
-        address token; // Payment token (for this lease)
-        uint256 currentUnitCost; // Updated cost for new/renewed leases
-        address currentToken; // Updated token for new/renewed leases
-        uint256 startTimestamp; // Lease start time
+        uint256 currentUnitCost;
+        address currentToken;
+        uint256 agreementCount;
+        bool active;
     }
-    
+
+    struct LeaseAgreement {
+        address lessee;
+        uint256 unitCost;
+        address token;
+        uint256 totalDuration;
+        uint256 startTimestamp;
+        uint256 daysWithdrawn;
+        uint256 withdrawableAmount;
+        bool ended;
+    }
+
     struct EndLeaseData {
-    uint256 daysElapsed;
-    uint256 daysLeft;
-    uint256 refund;
-    uint256 available;
-}
+        uint256 daysElapsed;
+        uint256 daysLeft;
+        uint256 refund;
+        uint256 available;
+    }
 
-    address public ensRegistry; // ENS registry address
-    address public owner; // Contract owner
-    mapping(bytes32 => Lease) public leases; // node => Lease
-    uint256 public leaseCount; // Counter for active leases
-    bytes32[] public leaseNodes; // Array for top-down view
-    mapping(address => uint256) public withdrawable; // Lessor => withdrawable amount in tokens
-    mapping(address => mapping(bytes32 => bool)) public lessorLeases; // Lessor => node => isActive
-    mapping(address => mapping(bytes32 => bool)) public lesseeLeases; // Lessee => node => isActive
-    bytes32[] public lessorNodes; // Lessor nodes array
-    bytes32[] public lesseeNodes; // Lessee nodes array
-    mapping(address => mapping(bytes32 => uint256)) public withdrawnPerLease; // Lessor => node => withdrawn amount
-    mapping(bytes32 => uint256) public nodeToLeaseNodesIndex; // node => index in leaseNodes
-    mapping(bytes32 => uint256) public nodeToLessorNodesIndex; // node => index in lessorNodes
-    mapping(bytes32 => uint256) public nodeToLesseeNodesIndex; // node => index in lesseeNodes
+    address public ensRegistry;
+    address public owner;
+    mapping(bytes32 => Lease) public leases;
+    mapping(bytes32 => mapping(uint256 => LeaseAgreement)) public agreements;
+    uint256 public leaseCount;
+    bytes32[] public leaseNodes;
+    mapping(address => mapping(bytes32 => bool)) public lessorLeases;
+    mapping(address => mapping(bytes32 => bool)) public lesseeLeases;
+    bytes32[] public lessorNodes;
+    bytes32[] public lesseeNodes;
+    mapping(bytes32 => uint256) public nodeToLeaseNodesIndex;
+    mapping(bytes32 => uint256) public nodeToLessorNodesIndex;
+    mapping(bytes32 => uint256) public nodeToLesseeNodesIndex;
 
-    event Subscribed(bytes32 indexed node, address lessee, uint256 dayDuration);
-    event Renewed(bytes32 indexed node, uint256 daysRenewed);
-    event Ended(bytes32 indexed node, uint256 refunded);
+    event Subscribed(bytes32 indexed node, address lessee, uint256 dayDuration, uint256 leaseId);
+    event Renewed(bytes32 indexed node, uint256 daysRenewed, uint256 leaseId);
+    event Ended(bytes32 indexed node, uint256 refunded, uint256 leaseId);
     event TermsSet(bytes32 indexed node, uint256 unitCost, address token);
+    event Withdrawn(bytes32 indexed node, uint256 leaseId, uint256 amount);
 
-    receive() external payable {} // Allow ETH receipt for flexibility
+    receive() external payable {}
 
     constructor() {
         owner = msg.sender;
-        ensRegistry = 0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e; // Default ENS registry
+        ensRegistry = 0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e;
     }
 
     function setENSRegistry(address newRegistry) external {
@@ -79,20 +92,17 @@ contract Karah {
     }
 
     function createLease(bytes32 node, uint256 unitCost, address token) external {
-        // Creates a new lease for an ENS node
         require(IENS(ensRegistry).owner(node) == msg.sender, "Not ENS owner");
         require(leases[node].lessor == address(0), "Lease exists");
         require(unitCost > 0, "Invalid cost");
         require(token != address(0), "Invalid token");
-        leases[node].lessor = msg.sender;
-        leases[node].currentUnitCost = unitCost;
-        leases[node].currentToken = token;
+        leases[node] = Lease(msg.sender, unitCost, token, 0, false);
         IENS(ensRegistry).setOwner(node, address(this));
         emit TermsSet(node, unitCost, token);
     }
 
+// Lessor should not change token during active lease, withdraw will use latest token only.
     function updateLeaseTerms(bytes32 node, uint256 unitCost, address token) external {
-        // Updates lease terms for future subscriptions/renewals
         require(leases[node].lessor == msg.sender, "Not lessor");
         require(unitCost > 0, "Invalid cost");
         require(token != address(0), "Invalid token");
@@ -102,251 +112,251 @@ contract Karah {
     }
 
     function subscribe(bytes32 node, uint256 durationDays) external {
-    // Changelog: 27/10/2025: Removed IENS.setOwner as contract already owns node.
-    // Subscribes to a lease, transferring tokens and setting lessee
-    require(leases[node].currentToken != address(0), "No terms set");
-    require(leases[node].lessee == address(0), "Already leased");
-    require(durationDays > 0, "Invalid days");
-    uint256 cost = durationDays * leases[node].currentUnitCost;
-    uint8 decimals = IERC20(leases[node].currentToken).decimals();
-    cost = cost * (10 ** uint256(decimals));
-    uint256 balanceBefore = IERC20(leases[node].currentToken).balanceOf(address(this));
-    require(IERC20(leases[node].currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
-    uint256 balanceAfter = IERC20(leases[node].currentToken).balanceOf(address(this));
-    require(balanceAfter - balanceBefore >= cost, "Insufficient transfer");
-    withdrawable[leases[node].lessor] += cost;
-    leases[node].lessee = msg.sender;
-    leases[node].totalDuration = durationDays;
-    leases[node].unitCost = leases[node].currentUnitCost;
-    leases[node].token = leases[node].currentToken;
-    leases[node].startTimestamp = block.timestamp;
-    leaseNodes.push(node);
-    nodeToLeaseNodesIndex[node] = leaseNodes.length - 1;
-    lessorLeases[leases[node].lessor][node] = true;
-    lesseeLeases[msg.sender][node] = true;
-    lessorNodes.push(node);
-    nodeToLessorNodesIndex[node] = lessorNodes.length - 1;
-    lesseeNodes.push(node);
-    nodeToLesseeNodesIndex[node] = lesseeNodes.length - 1;
-    leaseCount++;
-    emit Subscribed(node, msg.sender, durationDays);
-}
+        Lease storage l = leases[node];
+        require(l.currentToken != address(0), "No terms set");
+        require(!l.active, "Already leased");
+        require(durationDays > 0, "Invalid days");
+
+        uint256 cost = durationDays * l.currentUnitCost;
+        uint8 dec = IERC20(l.currentToken).decimals();
+        cost = cost * (10 ** uint256(dec));
+
+        uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
+        require(IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
+        require(IERC20(l.currentToken).balanceOf(address(this)) - balBefore >= cost, "Insufficient transfer");
+
+        uint256 leaseId = l.agreementCount++;
+        agreements[node][leaseId] = LeaseAgreement(
+            msg.sender,
+            l.currentUnitCost,
+            l.currentToken,
+            durationDays,
+            block.timestamp,
+            0,
+            cost,
+            false
+        );
+
+        l.active = true;
+        _updateActiveArrays(node, true);
+
+        emit Subscribed(node, msg.sender, durationDays, leaseId);
+    }
 
     function renew(bytes32 node, uint256 renewalDays) external {
-        // Renews an existing lease, extending duration
-        require(leases[node].lessee == msg.sender, "Not lessee");
+        Lease storage l = leases[node];
+        uint256 leaseId = l.agreementCount - 1;
+        LeaseAgreement storage a = agreements[node][leaseId];
+        require(a.lessee == msg.sender, "Not lessee");
         require(renewalDays > 0, "Invalid days");
-        uint256 cost = renewalDays * leases[node].currentUnitCost;
-        uint8 decimals = IERC20(leases[node].currentToken).decimals();
-        cost = cost * (10 ** uint256(decimals));
-        uint256 balanceBefore = IERC20(leases[node].currentToken).balanceOf(address(this));
-        require(IERC20(leases[node].currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
-        uint256 balanceAfter = IERC20(leases[node].currentToken).balanceOf(address(this));
-        require(balanceAfter - balanceBefore >= cost, "Insufficient transfer");
-        withdrawable[leases[node].lessor] += cost;
-        leases[node].totalDuration += renewalDays;
-        leases[node].unitCost = leases[node].currentUnitCost;
-        leases[node].token = leases[node].currentToken;
-        emit Renewed(node, renewalDays);
+
+        uint256 cost = renewalDays * l.currentUnitCost;
+        uint8 dec = IERC20(l.currentToken).decimals();
+        cost = cost * (10 ** uint256(dec));
+
+        uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
+        require(IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
+        require(IERC20(l.currentToken).balanceOf(address(this)) - balBefore >= cost, "Insufficient transfer");
+
+        a.withdrawableAmount += cost;
+        a.totalDuration += renewalDays;
+        a.unitCost = l.currentUnitCost;
+        a.token = l.currentToken;
+
+        emit Renewed(node, renewalDays, leaseId);
     }
 
-//Helpers for endLease to reduce stack usage.
-    function _calculateRefund(bytes32 node) private view returns (EndLeaseData memory) {
-    // Calculates refund data for lease termination
-    uint256 daysElapsed = (block.timestamp - leases[node].startTimestamp) / 1 days;
-    uint256 daysLeft = leases[node].totalDuration > daysElapsed ? leases[node].totalDuration - daysElapsed : 0;
-    uint256 refund = daysLeft * leases[node].unitCost;
-    uint8 decimals = IERC20(leases[node].token).decimals();
-    refund = refund * (10 ** uint256(decimals));
-    uint256 available = withdrawable[leases[node].lessor] - withdrawnPerLease[leases[node].lessor][node];
-    return EndLeaseData(daysElapsed, daysLeft, refund, available);
-}
-
-function _updateArrays(bytes32 node) private {
-    // Performs O(1) swap-and-pop for all arrays
-    uint256 leaseIndex = nodeToLeaseNodesIndex[node];
-    bytes32 lastLeaseNode = leaseNodes[leaseNodes.length - 1];
-    leaseNodes[leaseIndex] = lastLeaseNode;
-    nodeToLeaseNodesIndex[lastLeaseNode] = leaseIndex;
-    leaseNodes.pop();
-    delete nodeToLeaseNodesIndex[node];
-
-    uint256 lessorIndex = nodeToLessorNodesIndex[node];
-    bytes32 lastLessorNode = lessorNodes[lessorNodes.length - 1];
-    lessorNodes[lessorIndex] = lastLessorNode;
-    nodeToLessorNodesIndex[lastLessorNode] = lessorIndex;
-    lessorNodes.pop();
-    delete nodeToLessorNodesIndex[node];
-
-    uint256 lesseeIndex = nodeToLesseeNodesIndex[node];
-    bytes32 lastLesseeNode = lesseeNodes[lesseeNodes.length - 1];
-    lesseeNodes[lesseeIndex] = lastLesseeNode;
-    nodeToLesseeNodesIndex[lastLesseeNode] = lesseeIndex;
-    lesseeNodes.pop();
-    delete nodeToLesseeNodesIndex[node];
-}
-
-function _updateLeaseState(bytes32 node, uint256 refund) private {
-    // Updates lease state and processes refund
-    withdrawable[leases[node].lessor] -= refund;
-    leases[node].lessee = address(0);
-    leases[node].totalDuration = 0;
-    lessorLeases[leases[node].lessor][node] = false;
-    lesseeLeases[msg.sender][node] = false;
-    leaseCount--;
-    IENS(ensRegistry).setOwner(node, leases[node].lessor);
-    if (refund > 0) {
-        require(IERC20(leases[node].token).transfer(msg.sender, refund), "Refund failed");
+    function _calculateRefund(bytes32 node, uint256 leaseId) private view returns (EndLeaseData memory) {
+        LeaseAgreement storage a = agreements[node][leaseId];
+        uint256 daysElapsed = (block.timestamp - a.startTimestamp) / 1 days;
+        uint256 daysLeft = a.totalDuration > daysElapsed ? a.totalDuration - daysElapsed : 0;
+        uint256 refund = daysLeft * a.unitCost;
+        uint8 dec = IERC20(a.token).decimals();
+        refund = refund * (10 ** uint256(dec));
+        return EndLeaseData(daysElapsed, daysLeft, refund, a.withdrawableAmount);
     }
-}
 
-function endLease(bytes32 node) external {
-    // Changelog: 27/10/2025: Removed IENS.setOwner to prevent unnecessary  ownership transfer.
-    // Ends a lease, refunds unused days, keeps ENS ownership with contract
-    require(leases[node].lessee == msg.sender, "Not lessee");
-    EndLeaseData memory data = _calculateRefund(node);
-    require(data.refund <= data.available, "Insufficient withdrawable");
-    _updateArrays(node);
-    withdrawable[leases[node].lessor] -= data.refund;
-    leases[node].lessee = address(0);
-    leases[node].totalDuration = 0;
-    lessorLeases[leases[node].lessor][node] = false;
-    lesseeLeases[msg.sender][node] = false;
-    leaseCount--;
-    if (data.refund > 0) {
-        require(IERC20(leases[node].token).transfer(msg.sender, data.refund), "Refund failed");
+    function endLease(bytes32 node) external {
+        Lease storage l = leases[node];
+        uint256 leaseId = l.agreementCount - 1;
+        LeaseAgreement storage a = agreements[node][leaseId];
+        require(a.lessee == msg.sender, "Not lessee");
+
+        EndLeaseData memory d = _calculateRefund(node, leaseId);
+        require(d.refund <= d.available, "Insufficient funds");
+
+        a.withdrawableAmount -= d.refund;
+        a.ended = true;
+        l.active = false;
+        _updateActiveArrays(node, false);
+        leaseCount--;
+
+        if (d.refund > 0) {
+            require(IERC20(a.token).transfer(msg.sender, d.refund), "Refund failed");
+        }
+        emit Ended(node, d.refund, leaseId);
     }
-    emit Ended(node, data.refund);
-}
 
     function reclaimName(bytes32 node) external {
-        // Changelog: 27/10/2025: Replaced O(n) loop with O(1) swap-and-pop using index mappings.
-        // Allows lessor to reclaim ENS name, ending lease if active
-        require(leases[node].lessor == msg.sender, "Not lessor");
-        if (leases[node].lessee != address(0)) {
-            uint256 daysElapsed = (block.timestamp - leases[node].startTimestamp) / 1 days;
-            uint256 daysLeft = leases[node].totalDuration > daysElapsed ? leases[node].totalDuration - daysElapsed : 0;
-            uint256 refund = daysLeft * leases[node].unitCost;
-            uint8 decimals = IERC20(leases[node].token).decimals();
-            refund = refund * (10 ** uint256(decimals));
-            uint256 available = withdrawable[leases[node].lessor] - withdrawnPerLease[leases[node].lessor][node];
-            require(refund <= available, "Insufficient withdrawable");
-            withdrawable[leases[node].lessor] -= refund;
-            leases[node].lessee = address(0);
-            leases[node].totalDuration = 0;
-            lessorLeases[leases[node].lessor][node] = false;
-            lesseeLeases[leases[node].lessee][node] = false;
-            // Swap-and-pop for leaseNodes
-            uint256 leaseIndex = nodeToLeaseNodesIndex[node];
-            bytes32 lastLeaseNode = leaseNodes[leaseNodes.length - 1];
-            leaseNodes[leaseIndex] = lastLeaseNode;
-            nodeToLeaseNodesIndex[lastLeaseNode] = leaseIndex;
-            leaseNodes.pop();
-            delete nodeToLeaseNodesIndex[node];
-            // Swap-and-pop for lessorNodes
-            uint256 lessorIndex = nodeToLessorNodesIndex[node];
-            bytes32 lastLessorNode = lessorNodes[lessorNodes.length - 1];
-            lessorNodes[lessorIndex] = lastLessorNode;
-            nodeToLessorNodesIndex[lastLessorNode] = lessorIndex;
-            lessorNodes.pop();
-            delete nodeToLessorNodesIndex[node];
-            // Swap-and-pop for lesseeNodes
-            uint256 lesseeIndex = nodeToLesseeNodesIndex[node];
-            bytes32 lastLesseeNode = lesseeNodes[lesseeNodes.length - 1];
-            lesseeNodes[lesseeIndex] = lastLesseeNode;
-            nodeToLesseeNodesIndex[lastLesseeNode] = lesseeIndex;
-            lesseeNodes.pop();
-            delete nodeToLesseeNodesIndex[node];
+        Lease storage l = leases[node];
+        require(l.lessor == msg.sender, "Not lessor");
+        if (l.active) {
+            uint256 leaseId = l.agreementCount - 1;
+            LeaseAgreement storage a = agreements[node][leaseId];
+            EndLeaseData memory d = _calculateRefund(node, leaseId);
+            require(d.refund <= d.available, "Insufficient funds");
+            a.withdrawableAmount -= d.refund;
+            a.ended = true;
+            l.active = false;
+            _updateActiveArrays(node, false);
             leaseCount--;
-            emit Ended(node, refund);
-            if (refund > 0) {
-                require(IERC20(leases[node].token).transfer(leases[node].lessee, refund), "Refund failed");
+            if (d.refund > 0) {
+                require(IERC20(a.token).transfer(a.lessee, d.refund), "Refund failed");
             }
+            emit Ended(node, d.refund, leaseId);
         }
         IENS(ensRegistry).setOwner(node, msg.sender);
     }
 
-    function withdraw(bytes32 node) external {
-        // Changelog: 27/10/2025: Removed withdrawable subtraction to fix accounting flaw.
-        // Allows lessor to withdraw earned tokens
-        require(leases[node].lessor == msg.sender, "Not lessor");
-        require(leases[node].lessee != address(0), "No active lease");
-        uint256 daysElapsed = (block.timestamp - leases[node].startTimestamp) / 1 days;
-        uint256 amount = daysElapsed * leases[node].unitCost;
-        uint8 decimals = IERC20(leases[node].token).decimals();
-        amount = amount * (10 ** uint256(decimals));
-        uint256 available = withdrawable[msg.sender] - withdrawnPerLease[msg.sender][node];
-        require(amount <= available, "Insufficient withdrawable");
-        withdrawnPerLease[msg.sender][node] += amount;
-        require(IERC20(leases[node].token).transfer(msg.sender, amount), "Transfer failed");
+    function withdraw(bytes32 node, uint256 leaseId) external {
+        Lease storage l = leases[node];
+        require(l.lessor == msg.sender, "Not lessor");
+        require(leaseId < l.agreementCount, "Invalid leaseId");
+        LeaseAgreement storage a = agreements[node][leaseId];
+
+        uint256 daysElapsed = a.ended ? a.totalDuration : (block.timestamp - a.startTimestamp) / 1 days;
+        uint256 newDays = daysElapsed > a.daysWithdrawn ? daysElapsed - a.daysWithdrawn : 0;
+        require(newDays > 0, "Nothing to withdraw"); // 0 if called at startTimestamp
+
+        uint256 amount = newDays * a.unitCost * (10 ** uint256(IERC20(a.token).decimals()));
+        require(amount <= a.withdrawableAmount, "Insufficient funds");
+
+        a.daysWithdrawn += newDays;
+        a.withdrawableAmount -= amount;
+        require(IERC20(a.token).transfer(msg.sender, amount), "Transfer failed");
+        emit Withdrawn(node, leaseId, amount);
     }
 
     function modifyContent(bytes32 node, bytes32 label, address subnodeOwner, address resolver, uint64 ttl) external {
-        // Allows lessee to modify ENS records if lease is active
-        require(leases[node].lessee == msg.sender, "Not lessee");
-        uint256 daysElapsed = (block.timestamp - leases[node].startTimestamp) / 1 days;
-        uint256 daysLeft = leases[node].totalDuration > daysElapsed ? leases[node].totalDuration - daysElapsed : 0;
-        require(daysLeft > 0, "Lease expired");
+        Lease storage l = leases[node];
+        require(l.active, "No active lease");
+        uint256 leaseId = l.agreementCount - 1;
+        LeaseAgreement storage a = agreements[node][leaseId];
+        require(a.lessee == msg.sender, "Not lessee");
+
+        uint256 daysElapsed = (block.timestamp - a.startTimestamp) / 1 days;
+        require(daysElapsed < a.totalDuration, "Lease expired");
+
         if (label != bytes32(0)) {
             IENS(ensRegistry).setSubnodeOwner(node, label, subnodeOwner);
         }
         IENS(ensRegistry).setRecord(node, address(this), resolver, ttl);
     }
 
-    function viewLeases(uint256 maxIterations) external view returns (bytes32[] memory nodes, uint256 count) {
-        // Returns active lease nodes in top-down order
-        uint256 length = leaseCount < maxIterations ? leaseCount : maxIterations;
-        nodes = new bytes32[](length);
-        for (uint256 i = 0; i < length; i++) {
-            nodes[i] = leaseNodes[leaseCount - 1 - i];
+    function _updateActiveArrays(bytes32 node, bool add) private {
+        if (add) {
+            leaseNodes.push(node);
+            nodeToLeaseNodesIndex[node] = leaseNodes.length - 1;
+            lessorLeases[leases[node].lessor][node] = true;
+            lesseeLeases[agreements[node][leases[node].agreementCount - 1].lessee][node] = true;
+            lessorNodes.push(node);
+            nodeToLessorNodesIndex[node] = lessorNodes.length - 1;
+            lesseeNodes.push(node);
+            nodeToLesseeNodesIndex[node] = lesseeNodes.length - 1;
+            leaseCount++;
+        } else {
+            uint256 idx = nodeToLeaseNodesIndex[node];
+            bytes32 last = leaseNodes[leaseNodes.length - 1];
+            leaseNodes[idx] = last;
+            nodeToLeaseNodesIndex[last] = idx;
+            leaseNodes.pop();
+            delete nodeToLeaseNodesIndex[node];
+
+            idx = nodeToLessorNodesIndex[node];
+            last = lessorNodes[lessorNodes.length - 1];
+            lessorNodes[idx] = last;
+            nodeToLessorNodesIndex[last] = idx;
+            lessorNodes.pop();
+            delete nodeToLessorNodesIndex[node];
+
+            idx = nodeToLesseeNodesIndex[node];
+            last = lesseeNodes[lesseeNodes.length - 1];
+            lesseeNodes[idx] = last;
+            nodeToLesseeNodesIndex[last] = idx;
+            lesseeNodes.pop();
+            delete nodeToLesseeNodesIndex[node];
+
+            lessorLeases[leases[node].lessor][node] = false;
+            lesseeLeases[agreements[node][leases[node].agreementCount - 1].lessee][node] = false;
         }
+    }
+
+    // --- Views ---
+    function viewLeases(uint256 maxIterations) external view returns (bytes32[] memory nodes, uint256 count) {
+        uint256 len = leaseCount < maxIterations ? leaseCount : maxIterations;
+        nodes = new bytes32[](len);
+        for (uint256 i = 0; i < len; i++) nodes[i] = leaseNodes[leaseCount - 1 - i];
         count = leaseCount;
     }
 
     function getAllLessorLeases(address lessor, uint256 maxIterations) external view returns (bytes32[] memory nodes, uint256 count) {
-        // Returns active leases for a lessor
-        uint256 length = lessorNodes.length < maxIterations ? lessorNodes.length : maxIterations;
-        bytes32[] memory temp = new bytes32[](length);
-        uint256 index = 0;
-        for (uint256 i = 0; i < length; i++) {
-            bytes32 node = lessorNodes[lessorNodes.length - 1 - i];
-            if (lessorLeases[lessor][node] && leases[node].lessee != address(0)) {
-                temp[index] = node;
-                index++;
-            }
+        uint256 len = lessorNodes.length < maxIterations ? lessorNodes.length : maxIterations;
+        bytes32[] memory temp = new bytes32[](len);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < len; i++) {
+            bytes32 n = lessorNodes[lessorNodes.length - 1 - i];
+            if (lessorLeases[lessor][n] && leases[n].active) temp[idx++] = n;
         }
-        nodes = new bytes32[](index);
-        for (uint256 i = 0; i < index; i++) nodes[i] = temp[i];
-        count = index;
+        nodes = new bytes32[](idx);
+        for (uint256 i = 0; i < idx; i++) nodes[i] = temp[i];
+        count = idx;
     }
 
     function getAllLesseeLeases(address lessee, uint256 maxIterations) external view returns (bytes32[] memory nodes, uint256 count) {
-        // Returns active leases for a lessee
-        uint256 length = lesseeNodes.length < maxIterations ? lesseeNodes.length : maxIterations;
-        bytes32[] memory temp = new bytes32[](length);
-        uint256 index = 0;
-        for (uint256 i = 0; i < length; i++) {
-            bytes32 node = lesseeNodes[lesseeNodes.length - 1 - i];
-            if (lesseeLeases[lessee][node]) {
-                temp[index] = node;
-                index++;
-            }
+        uint256 len = lesseeNodes.length < maxIterations ? lesseeNodes.length : maxIterations;
+        bytes32[] memory temp = new bytes32[](len);
+        uint256 idx = 0;
+        for (uint256 i = 0; i < len; i++) {
+            bytes32 n = lesseeNodes[lesseeNodes.length - 1 - i];
+            if (lesseeLeases[lessee][n]) temp[idx++] = n;
         }
-        nodes = new bytes32[](index);
-        for (uint256 i = 0; i < index; i++) nodes[i] = temp[i];
-        count = index;
+        nodes = new bytes32[](idx);
+        for (uint256 i = 0; i < idx; i++) nodes[i] = temp[i];
+        count = idx;
     }
 
-    function getLeaseDetails(bytes32 node) external view returns (address lessor, address lessee, uint256 unitCost, uint256 daysLeft, address token, uint256 currentUnitCost, address currentToken) {
-        // Returns details of a specific lease
-        Lease memory lease = leases[node];
-        uint256 daysElapsed = lease.startTimestamp == 0 ? 0 : (block.timestamp - lease.startTimestamp) / 1 days;
-        daysLeft = lease.totalDuration > daysElapsed ? lease.totalDuration - daysElapsed : 0;
-        return (lease.lessor, lease.lessee, lease.unitCost, daysLeft, lease.token, lease.currentUnitCost, lease.currentToken);
+    function getLeaseDetails(bytes32 node) external view returns (
+        address lessor, address lessee, uint256 unitCost, uint256 daysLeft,
+        address token, uint256 currentUnitCost, address currentToken, uint256 leaseId
+    ) {
+        Lease storage l = leases[node];
+        uint256 id = l.active ? l.agreementCount - 1 : type(uint256).max;
+        LeaseAgreement memory a;
+        if (l.active) a = agreements[node][id];
+        uint256 elapsed = l.active ? (block.timestamp - a.startTimestamp) / 1 days : 0;
+        daysLeft = l.active && a.totalDuration > elapsed ? a.totalDuration - elapsed : 0;
+        return (
+            l.lessor,
+            l.active ? a.lessee : address(0),
+            l.active ? a.unitCost : 0,
+            daysLeft,
+            l.active ? a.token : address(0),
+            l.currentUnitCost,
+            l.currentToken,
+            l.active ? id : 0
+        );
     }
 
-    function getActiveLeasesCount() external view returns (uint256 count) {
-        // Returns total active leases
+    function getAgreementDetails(bytes32 node, uint256 leaseId) external view returns (LeaseAgreement memory) {
+        require(leaseId < leases[node].agreementCount, "Invalid leaseId");
+        return agreements[node][leaseId];
+    }
+
+    function getAgreementCount(bytes32 node) external view returns (uint256) {
+        return leases[node].agreementCount;
+    }
+
+    function getActiveLeasesCount() external view returns (uint256) {
         return leaseCount;
     }
 }

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.2 (27/10/2025)
+// File Version: 0.0.3 (27/10/2025)
 // Changelog:
 // - 27/10/2025: Initial implementation of DAO for collective ENS name management.
 // - 28/10/2025: Added lease acquisition & termination via DAO proposals.
 // - Added contribution tracking, capped funding, proportional refund logic.
+// - Add ERC20 approval in acquisition . 
+
 
 interface IKarah {
     function modifyContent(bytes32 node, bytes32 label, address owner, address resolver, uint64 ttl) external;
@@ -228,11 +230,12 @@ function executeAcquisition(uint256 id) external {
     require(lp.collected >= lp.totalNeeded, "Underfunded");
     p.executed = true;
 
-    uint256 balBefore = IERC20(lp.token).balanceOf(karah);
-    require(IERC20(lp.token).transfer(karah, lp.totalNeeded), "Pay fail");
-    require(IERC20(lp.token).balanceOf(karah) - balBefore >= lp.totalNeeded, "Low pay");
+    // Approve Karah to pull funds
+    require(IERC20(lp.token).approve(karah, lp.totalNeeded), "Approve fail");
 
+    // Karah pulls via transferFrom
     IKarah(karah).subscribe(p.node, lp.durationDays);
+
     emit ProposalExecuted(id, p.node);
 }
 
