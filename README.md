@@ -1,7 +1,7 @@
 ## Overview
-`Karah` enables ENS name owners (lessors) to lease names to lessees. Lessees can modify nane and subname records during their lease period without owning the name. While `Konna` is a DAO template allowing lessees to collectively propose and vote on name changes, acting as a single lessee in `Karah`.
+`Karah` enables ENS name owners (lessors) to lease names to lessees. Lessees can modify name and subname records during their lease period without owning the name. While `Konna` is a DAO template allowing individual groups of lessees to propose and vote on name changes for a particular co-leased name, acting as a single lessee in `Karah`.
 
-**Version**: 0.0.2 (27/10/2025)  
+**Version**: 0.0.3 (28/10/2025)  
 **License**: BSL 1.1 - Peng Protocol 2025  
 **Solidity**: ^0.8.2  
 
@@ -81,31 +81,58 @@ Manages ENS name leasing, with `Karah` owning names during active lease terms. L
 ## Konna Contract
 
 ### Purpose
-DAO template for lessees to collectively manage ENS name changes via proposals, acting as a single lessee in `Karah`.
+DAO template for lessees to collectively acquire and manage ENS name leases via proposals. Acts as a `Karah` lessee executing content changes, lease acquisition and termination.
 
 ### Key Parameters
-- **Proposal struct**: Tracks `proposer`, `node`, `label`, `subnodeOwner`, `resolver`, `ttl`, `votesFor`, `expiry` (1–26 weeks), `executed`.
-- **proposals**: Maps proposal IDs to `Proposal` details.
-- **voted**: Maps proposal ID to voter status (`id => address => bool`).
-- **members**: Array of DAO members.
-- **proposalCount**: Tracks total proposals.
-- **karah**: `Karah` contract address (set by owner).
-- **owner**: Contract owner.
-- **MIN_EXPIRY (1 week), MAX_EXPIRY (26 weeks)**: Proposal validity bounds.
+- **Proposal struct**: `proposer`, `node`, `label`, `subnodeOwner`, `resolver`, `ttl`, `votesFor`, `expiry` (1–26 weeks), `executed`.
+- **LeaseProposal struct**: `totalNeeded`, `collected`, `token`, `durationDays`.
+- **proposals**: `id => Proposal`.
+- **leaseProps**: `id => LeaseProposal` (for acquisition/termination).
+- **contributions**: `id => voter => amount` (ERC20 contributed).
+- **voted**: `id => voter => voted`.
+- **members**: DAO members array.
+- **proposalCount**, **karah**, **owner**.
+- **MIN_EXPIRY = 1 weeks**, **MAX_EXPIRY = 26 weeks**.
 
 ### External Functions
-- **addMember(member)**: Owner adds DAO member. Updates `members`.
-- **removeMember(member)**: Owner removes member via swap-and-pop. Updates `members`.
-- **proposeChange(node, label, subnodeOwner, resolver, ttl, expiry)**: Member creates proposal. Updates `proposals`, `proposalCount`.
-- **vote(id, inFavor)**: Member votes. Updates `voted`, `votesFor`.
-- **executeChange(id)**: Executes approved proposal. Calls `IKarah.modifyContent`.
-- **viewProposals(maxIterations)**: Returns proposal IDs (top-down).
-- **setKarah(newKarah)**: Owner sets `Karah` address.
-- **transferOwnership(newOwner)**: Owner transfers ownership.
+#### Core
+- `addMember`, `removeMember`: Owner-managed membership.
+- `proposeChange`, `vote`, `executeChange`: ENS record/subnode updates via `Karah.modifyContent`.
+- `viewProposals(maxIterations)`: Top-down proposal IDs.
+
+#### Lease Acquisition
+- **proposeLease(node, durationDays, expiry)**: Member proposes lease. Fetches `currentUnitCost`, `currentToken` from `Karah.getLeaseDetails`. Sets `totalNeeded`.
+- **voteLease(id, inFavor, amount)**: Member votes + contributes ERC20. Caps pull to `totalNeeded - collected`. Pre/post balance check. Vote counts once.
+- **executeAcquisition(id)**: Requires quorum + full funding. Transfers exact `totalNeeded` to `Karah`, calls `subscribe`. Pre/post check.
+- **cancelStaleAcquisition(id)**: Post-expiry, refunds all contributions proportionally.
+
+#### Lease Termination
+- **proposeTermination(node, expiry)**: Requires `lessee == address(this)` via `getLeaseDetails`.
+- **voteTermination(id, inFavor)**: Standard vote, no funds.
+- **executeTermination(id)**: Quorum → calls `Karah.endLease`. Measures **delta balance** (pre/post) to isolate refund. Distributes proportionally via `_refundContributions`.
+
+#### Admin
+- `setKarah`, `transferOwnership`.
+
+### Internal Call Trees
+- **proposeLease** → `IKarah.getLeaseDetails` (view).
+- **voteLease** → `IERC20.transferFrom` + balance checks → updates `collected`, `contributions`.
+- **executeAcquisition** → `IERC20.transfer` (to Karah) + balance delta → `IKarah.subscribe`.
+- **cancelStaleAcquisition** → `_refundContributions(collected)`.
+- **proposeTermination** → `IKarah.getLeaseDetails` (checks lessee).
+- **executeTermination** → `IKarah.endLease` → balance delta → `_refundContributions(refund)`.
+
+#### Helpers
+- **isMember**: O(n) scan (small DAO).
+- **_voteBasic**: Shared vote logic.
+- **_refundContributions(id, amount)**: Proportional refund: `share = contrib * amount / collected`. Clears mapping.
 
 ### Insights
-- Proposals require majority (`> members.length / 2`) and valid expiry.
-- `removeMember` prevents quorum issues from inactive members.
-- `viewProposals` uses `maxIterations` for gas efficiency.
+- **Fund Isolation**: `executeTermination` uses **pre/post balance delta** — prevents draining other proposals (even same token).
+- **Contribution Capping**: `voteLease` pulls only what's needed.
+- **Proportional Refunds**: On stale or termination, contributors get fair share of actual refund.
+- **Quorum**: `> members.length / 2` (strict majority).
+- **Gas Control**: `maxIterations` in views; no unbounded loops.
+- **Security**: Pre/post checks on all ERC20 moves. No reentrancy (single external call).
+- **Flexibility**: Supports any ERC20 per lease. DAO can hold multiple leases.
 - `owner` can be another DAO (DAOception!).
-- `voted` ensures no double-voting.

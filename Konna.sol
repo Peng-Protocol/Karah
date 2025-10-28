@@ -1,12 +1,27 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.1 (27/10/2025)
+// File Version: 0.0.2 (27/10/2025)
 // Changelog:
 // - 27/10/2025: Initial implementation of DAO for collective ENS name management.
+// - 28/10/2025: Added lease acquisition & termination via DAO proposals.
+// - Added contribution tracking, capped funding, proportional refund logic.
 
 interface IKarah {
     function modifyContent(bytes32 node, bytes32 label, address owner, address resolver, uint64 ttl) external;
+    function getLeaseDetails(bytes32 node) external view returns (address lessor, address lessee, uint256 unitCost, uint256 daysLeft, address token, uint256 currentUnitCost, address currentToken);
+    function subscribe(bytes32 node, uint256 durationDays) external;
+    function endLease(bytes32 node) external;
+}
+
+interface IERC20 {
+    function decimals() external view returns (uint8);
+    function totalSupply() external view returns (uint256); // Added for OMFAgent prepListing
+    function balanceOf(address account) external view returns (uint256);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 contract Konna {
@@ -22,6 +37,13 @@ contract Konna {
     bool executed;
 }
 
+struct LeaseProposal {
+    uint256 totalNeeded;   // Full subscription cost
+    uint256 collected;     // ERC20 collected so far
+    address token;         // Lease payment token
+    uint256 durationDays;  // Lease duration
+}
+
     mapping(uint256 Index => Proposal) public proposals; // Proposal ID => Proposal
     mapping(uint256 Index => mapping(address => bool)) public voted; // Proposal ID => Voter => Voted
     uint256 public proposalCount; // Counter for proposals
@@ -31,6 +53,9 @@ contract Konna {
 
 address public karah; // Karah contract address
 address public owner; // Contract owner
+
+mapping(uint256 => LeaseProposal) public leaseProps; // id => LeaseProposal
+mapping(uint256 => mapping(address => uint256)) public contributions; // id => voter => amount
 
     event ProposalCreated(uint256 indexed id, address proposer, bytes32 node, uint256 expiry);
     event Voted(uint256 indexed id, address voter, bool inFavor);
@@ -123,4 +148,132 @@ function removeMember(address member) external {
         }
         count = proposalCount;
     }
+    
+    // New Helpers (0.0.2) 
+    
+    function isMember(address who) private view returns (bool) {
+    for (uint256 i = 0; i < members.length; i++) if (members[i] == who) return true;
+    return false;
+}
+
+function _voteBasic(uint256 id, bool inFavor) private {
+    Proposal storage p = proposals[id];
+    require(!p.executed && block.timestamp < p.expiry, "Invalid");
+    require(isMember(msg.sender), "Not member");
+    require(!voted[id][msg.sender], "Voted");
+    voted[id][msg.sender] = true;
+    if (inFavor) p.votesFor++;
+    emit Voted(id, msg.sender, inFavor);
+}
+
+function _refundContributions(uint256 id, uint256 totalRefund) private {
+    LeaseProposal memory lp = leaseProps[id];
+    if (totalRefund == 0 || lp.collected == 0) return;
+    for (uint256 i = 0; i < members.length; i++) {
+        address v = members[i];
+        uint256 contrib = contributions[id][v];
+        if (contrib > 0) {
+            uint256 share = contrib * totalRefund / lp.collected;
+            if (share > 0) IERC20(lp.token).transfer(v, share);
+            delete contributions[id][v];
+        }
+    }
+}
+   
+  // --- Acquisition ---
+  function proposeLease(
+    bytes32 node,
+    uint256 durationDays,
+    uint256 expiry
+) external {
+    require(isMember(msg.sender), "Not member");
+    require(expiry >= block.timestamp + MIN_EXPIRY && expiry <= block.timestamp + MAX_EXPIRY, "Bad expiry");
+    ( , , , , address token, uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
+    require(token != address(0), "No terms");
+    uint8 dec = IERC20(token).decimals();
+    uint256 total = durationDays * currentUnitCost * (10 ** uint256(dec));
+
+    uint256 id = proposalCount++;
+    proposals[id] = Proposal(msg.sender, node, bytes32(0), address(0), address(0), 0, 0, expiry, false);
+    leaseProps[id] = LeaseProposal(total, 0, token, durationDays);
+    emit ProposalCreated(id, msg.sender, node, expiry);
+}
+
+function voteLease(uint256 id, bool inFavor, uint256 amount) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && block.timestamp < p.expiry, "Invalid state");
+    require(isMember(msg.sender), "Not member");
+    require(!voted[id][msg.sender], "Voted");
+
+    LeaseProposal storage lp = leaseProps[id];
+    uint256 stillNeeded = lp.totalNeeded > lp.collected ? lp.totalNeeded - lp.collected : 0;
+    uint256 pull = amount > stillNeeded ? stillNeeded : amount;
+    if (pull > 0) {
+        uint256 balBefore = IERC20(lp.token).balanceOf(address(this));
+        require(IERC20(lp.token).transferFrom(msg.sender, address(this), pull), "Xfer fail");
+        require(IERC20(lp.token).balanceOf(address(this)) - balBefore >= pull, "Low xfer");
+        lp.collected += pull;
+        contributions[id][msg.sender] = pull;
+    }
+    voted[id][msg.sender] = true;
+    if (inFavor) p.votesFor++;
+    emit Voted(id, msg.sender, inFavor);
+}
+
+function executeAcquisition(uint256 id) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && block.timestamp < p.expiry, "Invalid");
+    require(p.votesFor > members.length / 2, "No quorum");
+    LeaseProposal memory lp = leaseProps[id];
+    require(lp.collected >= lp.totalNeeded, "Underfunded");
+    p.executed = true;
+
+    uint256 balBefore = IERC20(lp.token).balanceOf(karah);
+    require(IERC20(lp.token).transfer(karah, lp.totalNeeded), "Pay fail");
+    require(IERC20(lp.token).balanceOf(karah) - balBefore >= lp.totalNeeded, "Low pay");
+
+    IKarah(karah).subscribe(p.node, lp.durationDays);
+    emit ProposalExecuted(id, p.node);
+}
+
+function cancelStaleAcquisition(uint256 id) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && block.timestamp >= p.expiry, "Not stale");
+    p.executed = true;
+    _refundContributions(id, leaseProps[id].collected);
+    emit ProposalExecuted(id, p.node); // reuse event
+}
+
+// --- Termination ---
+
+function proposeTermination(bytes32 node, uint256 expiry) external {
+    require(isMember(msg.sender), "Not member");
+    ( , address lessee, , , , , ) = IKarah(karah).getLeaseDetails(node);
+    require(lessee == address(this), "Not leased");
+    uint256 id = proposalCount++;
+    proposals[id] = Proposal(msg.sender, node, bytes32(0), address(0), address(0), 0, 0, expiry, false);
+    emit ProposalCreated(id, msg.sender, node, expiry);
+}
+
+function voteTermination(uint256 id, bool inFavor) external {
+    _voteBasic(id, inFavor); // reuses vote logic, no extra funds
+}
+
+function executeTermination(uint256 id) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && block.timestamp < p.expiry, "Invalid");
+    require(p.votesFor > members.length / 2, "No quorum");
+
+    ( , , , , address token, , ) = IKarah(karah).getLeaseDetails(p.node);
+    uint256 balBefore = IERC20(token).balanceOf(address(this));
+
+    p.executed = true;
+    IKarah(karah).endLease(p.node);
+
+    uint256 balAfter = IERC20(token).balanceOf(address(this));
+    uint256 refund = balAfter - balBefore;
+
+    _refundContributions(id, refund);
+    emit ProposalExecuted(id, p.node);
+}
 }
