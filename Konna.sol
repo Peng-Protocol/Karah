@@ -16,7 +16,7 @@ interface IKarah {
     function endLease(bytes32 node) external;
 }
 
-interface IERC20 {
+interface IERC20b {
     function decimals() external view returns (uint8);
     function totalSupply() external view returns (uint256); // Added for OMFAgent prepListing
     function balanceOf(address account) external view returns (uint256);
@@ -176,7 +176,7 @@ function _refundContributions(uint256 id, uint256 totalRefund) private {
         uint256 contrib = contributions[id][v];
         if (contrib > 0) {
             uint256 share = contrib * totalRefund / lp.collected;
-            if (share > 0) IERC20(lp.token).transfer(v, share);
+            if (share > 0) IERC20b(lp.token).transfer(v, share);
             delete contributions[id][v];
         }
     }
@@ -192,7 +192,7 @@ function _refundContributions(uint256 id, uint256 totalRefund) private {
     require(expiry >= block.timestamp + MIN_EXPIRY && expiry <= block.timestamp + MAX_EXPIRY, "Bad expiry");
     ( , , , , address token, uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
     require(token != address(0), "No terms");
-    uint8 dec = IERC20(token).decimals();
+    uint8 dec = IERC20b(token).decimals();
     uint256 total = durationDays * currentUnitCost * (10 ** uint256(dec));
 
     uint256 id = proposalCount++;
@@ -211,9 +211,9 @@ function voteLease(uint256 id, bool inFavor, uint256 amount) external {
     uint256 stillNeeded = lp.totalNeeded > lp.collected ? lp.totalNeeded - lp.collected : 0;
     uint256 pull = amount > stillNeeded ? stillNeeded : amount;
     if (pull > 0) {
-        uint256 balBefore = IERC20(lp.token).balanceOf(address(this));
-        require(IERC20(lp.token).transferFrom(msg.sender, address(this), pull), "Xfer fail");
-        require(IERC20(lp.token).balanceOf(address(this)) - balBefore >= pull, "Low xfer");
+        uint256 balBefore = IERC20b(lp.token).balanceOf(address(this));
+        require(IERC20b(lp.token).transferFrom(msg.sender, address(this), pull), "Xfer fail");
+        require(IERC20b(lp.token).balanceOf(address(this)) - balBefore >= pull, "Low xfer");
         lp.collected += pull;
         contributions[id][msg.sender] = pull;
     }
@@ -231,7 +231,7 @@ function executeAcquisition(uint256 id) external {
     p.executed = true;
 
     // Approve Karah to pull funds
-    require(IERC20(lp.token).approve(karah, lp.totalNeeded), "Approve fail");
+    require(IERC20b(lp.token).approve(karah, lp.totalNeeded), "Approve fail");
 
     // Karah pulls via transferFrom
     IKarah(karah).subscribe(p.node, lp.durationDays);
@@ -268,12 +268,12 @@ function executeTermination(uint256 id) external {
     require(p.votesFor > members.length / 2, "No quorum");
 
     ( , , , , address token, , ) = IKarah(karah).getLeaseDetails(p.node);
-    uint256 balBefore = IERC20(token).balanceOf(address(this));
+    uint256 balBefore = IERC20b(token).balanceOf(address(this));
 
     p.executed = true;
     IKarah(karah).endLease(p.node);
 
-    uint256 balAfter = IERC20(token).balanceOf(address(this));
+    uint256 balAfter = IERC20b(token).balanceOf(address(this));
     uint256 refund = balAfter - balBefore;
 
     _refundContributions(id, refund);
