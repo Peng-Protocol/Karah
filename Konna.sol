@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.4 (31/10/2025)
+// File Version: 0.0.5 (31/10/2025)
 // Changelog:
+// - 31/10/2025: Fixed scaling error in proposeLease 
+// - 31/10/2025: Fixed _now() infinite recursion bug
 // - 31/10/2025: Added time warp system: currentTime, isWarped, warp(), unWarp(), _now().
 // - 27/10/2025: Initial implementation of DAO for collective ENS name management.
 // - 28/10/2025: Added lease acquisition & termination via DAO proposals.
@@ -86,7 +88,7 @@ function unWarp() external {
 }
 
 function _now() internal view returns (uint256) {
-    return isWarped ? currentTime : _now();
+    return isWarped ? currentTime : block.timestamp;
 }
 
 function setKarah(address newKarah) external {
@@ -203,23 +205,18 @@ function _refundContributions(uint256 id, uint256 totalRefund) private {
 }
    
   // --- Acquisition ---
-  function proposeLease(
-    bytes32 node,
-    uint256 durationDays,
-    uint256 expiry
-) external {
-    require(isMember(msg.sender), "Not member");
-    require(expiry >= _now() + MIN_EXPIRY && expiry <= _now() + MAX_EXPIRY, "Bad expiry");
-    ( , , , , address token, uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
-    require(token != address(0), "No terms");
-    uint8 dec = IERC20b(token).decimals();
-    uint256 total = durationDays * currentUnitCost * (10 ** uint256(dec));
+  function proposeLease(bytes32 node, uint256 durationDays, uint256 expiry) external {
+        require(isMember(msg.sender), "Not member");
+        require(expiry >= _now() + MIN_EXPIRY && expiry <= _now() + MAX_EXPIRY, "Bad expiry");
+        ( , , , , address token, uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
+        require(token != address(0), "No terms");
+        uint256 total = durationDays * currentUnitCost;  // unitCost is pre-scaled, no decimals multiplication
 
-    uint256 id = proposalCount++;
-    proposals[id] = Proposal(msg.sender, node, bytes32(0), address(0), address(0), 0, 0, expiry, false);
-    leaseProps[id] = LeaseProposal(total, 0, token, durationDays);
-    emit ProposalCreated(id, msg.sender, node, expiry);
-}
+        uint256 id = proposalCount++;
+        proposals[id] = Proposal(msg.sender, node, bytes32(0), address(0), address(0), 0, 0, expiry, false);
+        leaseProps[id] = LeaseProposal(total, 0, token, durationDays);
+        emit ProposalCreated(id, msg.sender, node, expiry);
+    }
 
 function voteLease(uint256 id, bool inFavor, uint256 amount) external {
     Proposal storage p = proposals[id];
