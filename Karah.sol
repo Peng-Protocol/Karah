@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.5 (28/10/2025)
-// Changelog:
-// - 27/10/2025: Initial implementation.
-// - 28/10/2025: Per-lease-agreement refactor.
-// - 28/10/2025: Removed global withdrawable. Added per-agreement withdrawableAmount.
-//   withdraw(node, leaseId) now safe, accurate, and isolated.
+// File Version: 0.0.9 (31/10/2025)
+// Changelog Summary:
+// - 31/10/2025: Added time warping system for testing: currentTime, warp(), unWarp().
+// - 31/10/2025: Added Error(string) events + detailed revert messages for debugging.
+// - 31/10/2025: Removed `10 ** decimals` in withdraw & _calculateRefund.
+// - 31/10/2025: Removed `cost = cost * (10 ** uint256(dec));` from subscribe & renew – unitCost is pre-scaled.
 // - 28/10/2025: Fixed underflow in modifyContent; added getAgreementDetails.
 // - Documented: withdraw at startTimestamp returns 0 (correct); renewal uses current terms.
+// - 28/10/2025: Removed global withdrawable. Added per-agreement withdrawableAmount.
+//   withdraw(node, leaseId) now safe, accurate, and isolated.
+// - 28/10/2025: Per-lease-agreement refactor.
+// - 27/10/2025: Initial implementation.
 
 interface IENS {
     function setOwner(bytes32 node, address owner) external;
@@ -65,18 +69,40 @@ contract Karah {
     mapping(bytes32 => uint256) public nodeToLeaseNodesIndex;
     mapping(bytes32 => uint256) public nodeToLessorNodesIndex;
     mapping(bytes32 => uint256) public nodeToLesseeNodesIndex;
+    
+    uint256 public currentTime;     // Stores effective time
+    bool public isWarped;           // True when manually warped
 
     event Subscribed(bytes32 indexed node, address lessee, uint256 dayDuration, uint256 leaseId);
     event Renewed(bytes32 indexed node, uint256 daysRenewed, uint256 leaseId);
     event Ended(bytes32 indexed node, uint256 refunded, uint256 leaseId);
     event TermsSet(bytes32 indexed node, uint256 unitCost, address token);
     event Withdrawn(bytes32 indexed node, uint256 leaseId, uint256 amount);
+    
+    error CustomError(string reason);
+    event Error(string reason);
 
     receive() external payable {}
 
     constructor() {
         owner = msg.sender;
         ensRegistry = 0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e;
+    }
+    
+    function warp(uint256 newTimestamp) external {
+        require(msg.sender == owner, "Not owner");
+        currentTime = newTimestamp;
+        isWarped = true;
+    }
+
+    function unWarp() external {
+        require(msg.sender == owner, "Not owner");
+        isWarped = false;
+        currentTime = block.timestamp;
+    }
+
+    function _now() internal view returns (uint256) {
+        return isWarped ? currentTime : block.timestamp;
     }
 
     function setENSRegistry(address newRegistry) external {
@@ -113,33 +139,26 @@ contract Karah {
 
     function subscribe(bytes32 node, uint256 durationDays) external {
         Lease storage l = leases[node];
-        require(l.currentToken != address(0), "No terms set");
-        require(!l.active, "Already leased");
-        require(durationDays > 0, "Invalid days");
+        if (l.currentToken == address(0)) { emit Error("No terms set"); revert CustomError("No terms set"); }
+        if (l.active) { emit Error("Already leased"); revert CustomError("Already leased"); }
+        if (durationDays == 0) { emit Error("Invalid days"); revert CustomError("Invalid days"); }
 
         uint256 cost = durationDays * l.currentUnitCost;
-        uint8 dec = IERC20(l.currentToken).decimals();
-        cost = cost * (10 ** uint256(dec));
 
         uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
-        require(IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
-        require(IERC20(l.currentToken).balanceOf(address(this)) - balBefore >= cost, "Insufficient transfer");
+        if (!IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost))
+            { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
+        if (IERC20(l.currentToken).balanceOf(address(this)) - balBefore < cost)
+            { emit Error("Insufficient transfer"); revert CustomError("Insufficient transfer"); }
 
         uint256 leaseId = l.agreementCount++;
         agreements[node][leaseId] = LeaseAgreement(
-            msg.sender,
-            l.currentUnitCost,
-            l.currentToken,
-            durationDays,
-            block.timestamp,
-            0,
-            cost,
-            false
+            msg.sender, l.currentUnitCost, l.currentToken, durationDays,
+            _now(), 0, cost, false
         );
 
         l.active = true;
         _updateActiveArrays(node, true);
-
         emit Subscribed(node, msg.sender, durationDays, leaseId);
     }
 
@@ -147,55 +166,54 @@ contract Karah {
         Lease storage l = leases[node];
         uint256 leaseId = l.agreementCount - 1;
         LeaseAgreement storage a = agreements[node][leaseId];
-        require(a.lessee == msg.sender, "Not lessee");
-        require(renewalDays > 0, "Invalid days");
+        if (a.lessee != msg.sender) { emit Error("Not lessee"); revert CustomError("Not lessee"); }
+        if (renewalDays == 0) { emit Error("Invalid days"); revert CustomError("Invalid days"); }
 
         uint256 cost = renewalDays * l.currentUnitCost;
-        uint8 dec = IERC20(l.currentToken).decimals();
-        cost = cost * (10 ** uint256(dec));
 
         uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
-        require(IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost), "Transfer failed");
-        require(IERC20(l.currentToken).balanceOf(address(this)) - balBefore >= cost, "Insufficient transfer");
+        if (!IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost))
+            { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
+        if (IERC20(l.currentToken).balanceOf(address(this)) - balBefore < cost)
+            { emit Error("Insufficient transfer"); revert CustomError("Insufficient transfer"); }
 
         a.withdrawableAmount += cost;
         a.totalDuration += renewalDays;
         a.unitCost = l.currentUnitCost;
         a.token = l.currentToken;
-
         emit Renewed(node, renewalDays, leaseId);
     }
 
     function _calculateRefund(bytes32 node, uint256 leaseId) private view returns (EndLeaseData memory) {
         LeaseAgreement storage a = agreements[node][leaseId];
-        uint256 daysElapsed = (block.timestamp - a.startTimestamp) / 1 days;
+        uint256 current = _now();
+        uint256 daysElapsed = (current - a.startTimestamp) / 1 days;
         uint256 daysLeft = a.totalDuration > daysElapsed ? a.totalDuration - daysElapsed : 0;
         uint256 refund = daysLeft * a.unitCost;
-        uint8 dec = IERC20(a.token).decimals();
-        refund = refund * (10 ** uint256(dec));
         return EndLeaseData(daysElapsed, daysLeft, refund, a.withdrawableAmount);
     }
 
     function endLease(bytes32 node) external {
-        Lease storage l = leases[node];
-        uint256 leaseId = l.agreementCount - 1;
-        LeaseAgreement storage a = agreements[node][leaseId];
-        require(a.lessee == msg.sender, "Not lessee");
+    Lease storage l = leases[node];
+    uint256 leaseId = l.agreementCount - 1;
+    LeaseAgreement storage a = agreements[node][leaseId];
+    if (a.lessee != msg.sender) { emit Error("Not lessee"); revert CustomError("Not lessee"); }
 
-        EndLeaseData memory d = _calculateRefund(node, leaseId);
-        require(d.refund <= d.available, "Insufficient funds");
+    EndLeaseData memory d = _calculateRefund(node, leaseId);
+    if (d.refund > d.available) { emit Error("Insufficient funds"); revert CustomError("Insufficient funds"); }
 
-        a.withdrawableAmount -= d.refund;
-        a.ended = true;
-        l.active = false;
-        _updateActiveArrays(node, false);
-        leaseCount--;
+    a.withdrawableAmount -= d.refund;
+    a.ended = true;
+    l.active = false;
+    _updateActiveArrays(node, false);
+    leaseCount--;
 
-        if (d.refund > 0) {
-            require(IERC20(a.token).transfer(msg.sender, d.refund), "Refund failed");
-        }
-        emit Ended(node, d.refund, leaseId);
+    if (d.refund > 0) {
+        if (!IERC20(a.token).transfer(msg.sender, d.refund))
+            { emit Error("Refund failed"); revert CustomError("Refund failed"); }
     }
+    emit Ended(node, d.refund, leaseId);
+}
 
     function reclaimName(bytes32 node) external {
         Lease storage l = leases[node];
@@ -220,20 +238,22 @@ contract Karah {
 
     function withdraw(bytes32 node, uint256 leaseId) external {
         Lease storage l = leases[node];
-        require(l.lessor == msg.sender, "Not lessor");
-        require(leaseId < l.agreementCount, "Invalid leaseId");
+        if (l.lessor != msg.sender) { emit Error("Not lessor"); revert CustomError("Not lessor"); }
+        if (leaseId >= l.agreementCount) { emit Error("Invalid leaseId"); revert CustomError("Invalid leaseId"); }
         LeaseAgreement storage a = agreements[node][leaseId];
 
-        uint256 daysElapsed = a.ended ? a.totalDuration : (block.timestamp - a.startTimestamp) / 1 days;
+        uint256 current = _now();
+        uint256 daysElapsed = a.ended ? a.totalDuration : (current - a.startTimestamp) / 1 days;
         uint256 newDays = daysElapsed > a.daysWithdrawn ? daysElapsed - a.daysWithdrawn : 0;
-        require(newDays > 0, "Nothing to withdraw"); // 0 if called at startTimestamp
+        if (newDays == 0) { emit Error("Nothing to withdraw"); revert CustomError("Nothing to withdraw"); }
 
-        uint256 amount = newDays * a.unitCost * (10 ** uint256(IERC20(a.token).decimals()));
-        require(amount <= a.withdrawableAmount, "Insufficient funds");
+        uint256 amount = newDays * a.unitCost;
+        if (amount > a.withdrawableAmount) { emit Error("Insufficient funds"); revert CustomError("Insufficient funds"); }
 
         a.daysWithdrawn += newDays;
         a.withdrawableAmount -= amount;
-        require(IERC20(a.token).transfer(msg.sender, amount), "Transfer failed");
+        if (!IERC20(a.token).transfer(msg.sender, amount))
+            { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
         emit Withdrawn(node, leaseId, amount);
     }
 
@@ -244,7 +264,8 @@ contract Karah {
         LeaseAgreement storage a = agreements[node][leaseId];
         require(a.lessee == msg.sender, "Not lessee");
 
-        uint256 daysElapsed = (block.timestamp - a.startTimestamp) / 1 days;
+        uint256 current = _now();
+        uint256 daysElapsed = (current - a.startTimestamp) / 1 days;
         require(daysElapsed < a.totalDuration, "Lease expired");
 
         if (label != bytes32(0)) {
@@ -333,7 +354,8 @@ contract Karah {
         uint256 id = l.active ? l.agreementCount - 1 : type(uint256).max;
         LeaseAgreement memory a;
         if (l.active) a = agreements[node][id];
-        uint256 elapsed = l.active ? (block.timestamp - a.startTimestamp) / 1 days : 0;
+        uint256 current = _now();
+        uint256 elapsed = l.active ? (current - a.startTimestamp) / 1 days : 0;
         daysLeft = l.active && a.totalDuration > elapsed ? a.totalDuration - elapsed : 0;
         return (
             l.lessor,

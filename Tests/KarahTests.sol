@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.4 (29/10/2025)
-// Changelog:
+// File Version: 0.0.5 (31/10/2025)
+// Changelog Summary:
+// - 31/10/2025: Removed vm_warp cheatcodes; use Karah.warp() instead.
+// - 31/10/2025: Warp to exact timestamps before time-sensitive calls.
 // - 29/10/2025: Fixed destructuring, replaced tstore/tload with vm.warp.
 // - 29/10/2025: Explicit return variable names.
 
@@ -93,29 +95,28 @@ function _getLeaseDetails() internal view returns (
     }
 
     function p1TestWithdraw() public {
-        vm_warp(block.timestamp + 3 days);
-        uint256 balBefore = token.balanceOf(address(testers[0]));
-        testers[0].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 0)
-        );
-        uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
-        require(withdrawn == 6e18, "Wrong withdraw amount");
-    }
+    // Warp 3 days forward from subscription
+    karah.warp(block.timestamp + 3 days);
+    uint256 balBefore = token.balanceOf(address(testers[0]));
+    testers[0].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 0)
+    );
+    uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
+    require(withdrawn == 6e18, "Wrong withdraw amount");
+}
 
     function p1TestEarlyTermination() public {
-        uint256 balBefore = token.balanceOf(address(testers[1]));
-        testers[1].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("endLease(bytes32)", NODE)
-        );
-        uint256 refunded = token.balanceOf(address(testers[1])) - balBefore;
-        require(refunded == 8e18, "Wrong refund");
-        (
-            , address lesseeAfter, , , , , ,
-        ) = karah.getLeaseDetails(NODE);
-        require(lesseeAfter == address(0), "Lease not cleared");
-    }
+    uint256 balBefore = token.balanceOf(address(testers[1]));
+    testers[1].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("endLease(bytes32)", NODE)
+    );
+    uint256 refunded = token.balanceOf(address(testers[1])) - balBefore;
+    require(refunded == 8e18, "Wrong refund");
+    (, address lesseeAfter, , , , , , ) = karah.getLeaseDetails(NODE);
+    require(lesseeAfter == address(0), "Lease not cleared");
+}
 
     function p2TestLease() public {
         _approveTester(2);
@@ -130,17 +131,16 @@ function _getLeaseDetails() internal view returns (
     }
 
     function p2TestNextLease() public {
-        vm_warp(block.timestamp + 7 days + 1);
-        _approveTester(3);
-        testers[3].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("subscribe(bytes32,uint256)", NODE, 7)
-        );
-        (
-            , address lessee, , uint256 daysLeft, , , ,
-        ) = karah.getLeaseDetails(NODE);
-        require(lessee == address(testers[3]) && daysLeft == 7, "next lease failed");
-    }
+    // Warp past first lease expiry
+    karah.warp(block.timestamp + 7 days + 1);
+    _approveTester(3);
+    testers[3].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("subscribe(bytes32,uint256)", NODE, 7)
+    );
+    (, address lessee, , uint256 daysLeft, , , , ) = karah.getLeaseDetails(NODE);
+    require(lessee == address(testers[3]) && daysLeft == 7, "next lease failed");
+}
 
     function p2TestRenew() public {
         testers[3].proxyCall(
@@ -154,25 +154,25 @@ function _getLeaseDetails() internal view returns (
     }
 
     function p2TestWithdraw1() public {
-        vm_warp(block.timestamp + 14 days + 1);
-        uint256 balBefore = token.balanceOf(address(testers[0]));
-        testers[0].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 1)
-        );
-        uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
-        require(withdrawn == 14e18, "withdraw lease2 failed");
-    }
+    karah.warp(block.timestamp + 14 days + 1);
+    uint256 balBefore = token.balanceOf(address(testers[0]));
+    testers[0].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 1)
+    );
+    uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
+    require(withdrawn == 14e18, "withdraw lease2 failed");
+}
 
     function p2TestWithdraw2() public {
-        uint256 balBefore = token.balanceOf(address(testers[0]));
-        testers[0].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 2)
-        );
-        uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
-        require(withdrawn == 14e18, "withdraw lease3 failed");
-    }
+    uint256 balBefore = token.balanceOf(address(testers[0]));
+    testers[0].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 2)
+    );
+    uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
+    require(withdrawn == 14e18, "withdraw lease3 failed");
+}
 
     function testUpdateTerms() public {
         testers[0].proxyCall(
@@ -188,13 +188,13 @@ function _getLeaseDetails() internal view returns (
     // **DEV NOTE**: Call `testLease` again to verify 4-token/day rate.
 
     function testReclamation() public {
-        vm_warp(block.timestamp + 30 days);
-        testers[0].proxyCall(
-            address(karah),
-            abi.encodeWithSignature("reclaimName(bytes32)", NODE)
-        );
-        require(ens.owner(NODE) == address(testers[0]), "reclaim failed");
-    }
+    karah.warp(block.timestamp + 30 days);
+    testers[0].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("reclaimName(bytes32)", NODE)
+    );
+    require(ens.owner(NODE) == address(testers[0]), "reclaim failed");
+}
 
     // **DEV NOTE**: Unwithdrawn revenue is lost on reclaim.
 
@@ -203,13 +203,5 @@ function _getLeaseDetails() internal view returns (
             address(token),
             abi.encodeWithSignature("approve(address,uint256)", address(karah), type(uint256).max)
         );
-    }
-
-    // Remix VM cheatcode
-    function vm_warp(uint256 timestamp) public {
-        (bool success, ) = address(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D).call(
-            abi.encodeWithSignature("warp(uint256)", timestamp)
-        );
-        require(success, "vm.warp failed");
     }
 }
