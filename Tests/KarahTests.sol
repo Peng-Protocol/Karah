@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.6 (01/11/2025)
+// File Version: 0.0.7 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: Fixed p2TestWithdraw2 expectation – lease 2 total is 28e18.
 // - 01/11/2025: Fixed time warping in tests using karah.currentTime() instead of block.timestamp.
 // - 31/10/2025: Removed vm_warp cheatcodes; use Karah.warp() instead.
 // - 31/10/2025: Warp to exact timestamps before time-sensitive calls.
@@ -174,7 +175,7 @@ function _getLeaseDetails() internal view returns (
         abi.encodeWithSignature("withdraw(bytes32,uint256)", NODE, 2)
     );
     uint256 withdrawn = token.balanceOf(address(testers[0])) - balBefore;
-    require(withdrawn == 14e18, "withdraw lease3 failed");
+    require(withdrawn == 28e18, "withdraw lease2 total failed");
 }
 
     function testUpdateTerms() public {

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.10 (01/11/2025)
+// File Version: 0.0.12 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: Fixed auto-end in subscribe() – removed a.withdrawableAmount = 0 to preserve lessor revenue on expiry.
+// - 01/11/2025: Fixed withdraw() over-withdrawal on expired leases – cap daysElapsed at totalDuration.
 // - 01/11/2025: subscribe() now auto-ends expired lease before new agreement.
 // - 31/10/2025: Added time warping system for testing: currentTime, warp(), unWarp().
 // - 31/10/2025: Added Error(string) events + detailed revert messages for debugging.
@@ -150,7 +152,7 @@ contract Karah {
         uint256 daysElapsed = (_now() - a.startTimestamp) / 1 days;
         if (daysElapsed >= a.totalDuration) {
             a.ended = true;
-            a.withdrawableAmount = 0; // forfeit remaining to lessor
+            // REMOVED: a.withdrawableAmount = 0; // Do NOT forfeit – lessor withdraws earned revenue
             l.active = false;
             _updateActiveArrays(node, false);
             leaseCount--;
@@ -252,25 +254,26 @@ contract Karah {
     }
 
     function withdraw(bytes32 node, uint256 leaseId) external {
-        Lease storage l = leases[node];
-        if (l.lessor != msg.sender) { emit Error("Not lessor"); revert CustomError("Not lessor"); }
-        if (leaseId >= l.agreementCount) { emit Error("Invalid leaseId"); revert CustomError("Invalid leaseId"); }
-        LeaseAgreement storage a = agreements[node][leaseId];
+    Lease storage l = leases[node];
+    if (l.lessor != msg.sender) { emit Error("Not lessor"); revert CustomError("Not lessor"); }
+    if (leaseId >= l.agreementCount) { emit Error("Invalid leaseId"); revert CustomError("Invalid leaseId"); }
+    LeaseAgreement storage a = agreements[node][leaseId];
 
-        uint256 current = _now();
-        uint256 daysElapsed = a.ended ? a.totalDuration : (current - a.startTimestamp) / 1 days;
-        uint256 newDays = daysElapsed > a.daysWithdrawn ? daysElapsed - a.daysWithdrawn : 0;
-        if (newDays == 0) { emit Error("Nothing to withdraw"); revert CustomError("Nothing to withdraw"); }
+    uint256 current = _now();
+    uint256 elapsed = (current - a.startTimestamp) / 1 days;
+    uint256 daysElapsed = a.ended ? a.totalDuration : (elapsed > a.totalDuration ? a.totalDuration : elapsed);
+    uint256 newDays = daysElapsed > a.daysWithdrawn ? daysElapsed - a.daysWithdrawn : 0;
+    if (newDays == 0) { emit Error("Nothing to withdraw"); revert CustomError("Nothing to withdraw"); }
 
-        uint256 amount = newDays * a.unitCost;
-        if (amount > a.withdrawableAmount) { emit Error("Insufficient funds"); revert CustomError("Insufficient funds"); }
+    uint256 amount = newDays * a.unitCost;
+    if (amount > a.withdrawableAmount) { emit Error("Insufficient funds"); revert CustomError("Insufficient funds"); }
 
-        a.daysWithdrawn += newDays;
-        a.withdrawableAmount -= amount;
-        if (!IERC20(a.token).transfer(msg.sender, amount))
-            { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
-        emit Withdrawn(node, leaseId, amount);
-    }
+    a.daysWithdrawn += newDays;
+    a.withdrawableAmount -= amount;
+    if (!IERC20(a.token).transfer(msg.sender, amount))
+        { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
+    emit Withdrawn(node, leaseId, amount);
+}
 
     function modifyContent(bytes32 node, bytes32 label, address subnodeOwner, address resolver, uint64 ttl) external {
         Lease storage l = leases[node];
