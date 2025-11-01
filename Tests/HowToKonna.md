@@ -18,6 +18,7 @@
 10. Call `testLease()`.
 11. Call `testContentMod()`.
 12. Call `testEarlyTermination()`.
+    - **DEV NOTE**: Call `testLease` again to start new lease.
 13. Call `testRenew()`:
     
 ## Objectives

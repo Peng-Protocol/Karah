@@ -25,6 +25,7 @@
 17. Call `p2TestWithdraw1()`.
 18. Call `p2TestWithdraw2()`.
 19. Call `testUpdateTerms()`.
+    - **DEV NOTE**: Call `testLease` again to verify new rate.
 20. Call `testReclamation()`.
     
 ## Objectives
@@ -82,7 +83,7 @@
     - **Looking For**: `currentUnitCost == 4e18`.
     - **DEV NOTE**: Call `testLease` again to verify new rate.
     
-20. Call `testReclamation()`:
+20. `testReclamation()`:
     - **Objective**: Fast-forward → lessor reclaims ENS name.
     - **Looking For**: `ens.owner(NODE) == testers[0]`, lease data cleared.
     - **DEV NOTE**: Any unwithdrawn revenue is **lost** on reclaim.
