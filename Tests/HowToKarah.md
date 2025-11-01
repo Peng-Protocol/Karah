@@ -25,8 +25,8 @@
 17. Call `p2TestWithdraw1()`.
 18. Call `p2TestWithdraw2()`.
 19. Call `testUpdateTerms()`.
-    - **DEV NOTE**: Call `testLease` again to verify new rate.
-20. Call `testReclamation()`.
+20. Call `p3TestLease`. 
+21. Call `testReclamation()`.
     
 ## Objectives
 7. `initiateTesters()`:
@@ -81,9 +81,13 @@
 19. `testUpdateTerms()`:
     - **Objective**: Lessor updates rate to 4 tokens/day.
     - **Looking For**: `currentUnitCost == 4e18`.
-    - **DEV NOTE**: Call `testLease` again to verify new rate.
     
-20. `testReclamation()`:
+20. `p3TestLease`:
+    - **Objective**: Tester 3 subscribes for 7 days (28 tokens total). Funds pulled to `Karah`.
+    - **Looking For**: `lessee == testers[3]`, `daysLeft == 7`, `karah.token.balance == 28e18`. 
+    - **Note**: This confirms new lease rate and continued functionality. 
+    
+21. `testReclamation()`:
     - **Objective**: Fast-forward → lessor reclaims ENS name.
     - **Looking For**: `ens.owner(NODE) == testers[0]`, lease data cleared.
     - **DEV NOTE**: Any unwithdrawn revenue is **lost** on reclaim.

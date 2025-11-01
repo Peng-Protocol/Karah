@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.7 (01/11/2025)
+// File Version: 0.0.8 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: Added p3TestLease() – verifies leasing works after updateLeaseTerms() with new rate (4e18/day).
 // - 01/11/2025: Fixed p2TestWithdraw2 expectation – lease 2 total is 28e18.
 // - 01/11/2025: Fixed time warping in tests using karah.currentTime() instead of block.timestamp.
 // - 31/10/2025: Removed vm_warp cheatcodes; use Karah.warp() instead.
@@ -189,7 +190,18 @@ function _getLeaseDetails() internal view returns (
         require(curCost == 4e18, "terms update failed");
     }
 
-    // **DEV NOTE**: Call `testLease` again to verify 4-token/day rate.
+function p3TestLease() public {
+    _approveTester(3);
+    testers[3].proxyCall(
+        address(karah),
+        abi.encodeWithSignature("subscribe(bytes32,uint256)", NODE, 7)
+    );
+    (
+        , address lessee, , uint256 daysLeft, , , ,
+    ) = karah.getLeaseDetails(NODE);
+    require(lessee == address(testers[3]) && daysLeft == 7, "p3 lease failed");
+    require(token.balanceOf(address(karah)) == 28e18, "p3 funds not in Karah"); // 7 * 4e18
+}
 
     function testReclamation() public {
     uint256 currentWarpTime = karah.currentTime();
