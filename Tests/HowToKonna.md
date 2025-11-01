@@ -21,7 +21,7 @@
 13. Call `testRenew()`:
     
 ## Objectives
-6. `deployTesters()` with **5 ETH**:
+6. `deployTesters()`:
    - **Objective**: Deploys 4 testers: `[0]` = lessor, `[1]` = Konna owner, `[2-3]` = DAO members. Each gets 1 ETH + 200k tokens.
    - **Looking For**: Successful setup.
 7. `addParticipants()`:

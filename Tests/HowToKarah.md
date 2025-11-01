@@ -12,10 +12,7 @@
 4. In "Deploy & Run Transactions", select **Remix VM**.
 5. Ensure default account has 100 ETH.
 6. Deploy `KarahTests` using the default account.
-7. Call `initiateTesters()` with **5 ETH** (value field):
-   - **Objective**: Deploys 4 `MockKarahTester` contracts: `[0]` = lessor, `[1-3]` = lessees. Each gets 1 ETH + 200,000 mock tokens.
-   - **Looking For**: Successful deployment, ETH/token distribution.
-   - **Avoid**: Wrong ETH value, failed transfers.
+7. Call `initiateTesters()` with **5 ETH** (value field).
 8. Call `testMint()`.
 9. Call `testTerms()`.
 10. Call `testLease()`.
@@ -31,6 +28,11 @@
 20. Call `testReclamation()`.
     
 ## Objectives
+7. `initiateTesters()`:
+   - **Objective**: Deploys 4 `MockKarahTester` contracts: `[0]` = lessor, `[1-3]` = lessees. Each gets 1 ETH + 200,000 mock tokens.
+   - **Looking For**: Successful deployment, ETH/token distribution.
+   - **Avoid**: Wrong ETH value, failed transfers.
+   
  8. `testMint()`:
   - **Objective**: Lessor registers `peng.eth` via `MockENS.register` (0.0001 ETH).
    - **Looking For**: `ens.owner(NODE) == testers[0]`.
