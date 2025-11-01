@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.9 (31/10/2025)
+// File Version: 0.0.10 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: subscribe() now auto-ends expired lease before new agreement.
 // - 31/10/2025: Added time warping system for testing: currentTime, warp(), unWarp().
 // - 31/10/2025: Added Error(string) events + detailed revert messages for debugging.
 // - 31/10/2025: Removed `10 ** decimals` in withdraw & _calculateRefund.
@@ -138,29 +139,43 @@ contract Karah {
     }
 
     function subscribe(bytes32 node, uint256 durationDays) external {
-        Lease storage l = leases[node];
-        if (l.currentToken == address(0)) { emit Error("No terms set"); revert CustomError("No terms set"); }
-        if (l.active) { emit Error("Already leased"); revert CustomError("Already leased"); }
-        if (durationDays == 0) { emit Error("Invalid days"); revert CustomError("Invalid days"); }
+    Lease storage l = leases[node];
+    if (l.currentToken == address(0)) { emit Error("No terms set"); revert CustomError("No terms set"); }
+    if (durationDays == 0) { emit Error("Invalid days"); revert CustomError("Invalid days"); }
 
-        uint256 cost = durationDays * l.currentUnitCost;
-
-        uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
-        if (!IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost))
-            { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
-        if (IERC20(l.currentToken).balanceOf(address(this)) - balBefore < cost)
-            { emit Error("Insufficient transfer"); revert CustomError("Insufficient transfer"); }
-
-        uint256 leaseId = l.agreementCount++;
-        agreements[node][leaseId] = LeaseAgreement(
-            msg.sender, l.currentUnitCost, l.currentToken, durationDays,
-            _now(), 0, cost, false
-        );
-
-        l.active = true;
-        _updateActiveArrays(node, true);
-        emit Subscribed(node, msg.sender, durationDays, leaseId);
+    // Auto-end if lease exists and expired
+    if (l.active) {
+        uint256 oldLeaseId = l.agreementCount - 1;
+        LeaseAgreement storage a = agreements[node][oldLeaseId];
+        uint256 daysElapsed = (_now() - a.startTimestamp) / 1 days;
+        if (daysElapsed >= a.totalDuration) {
+            a.ended = true;
+            a.withdrawableAmount = 0; // forfeit remaining to lessor
+            l.active = false;
+            _updateActiveArrays(node, false);
+            leaseCount--;
+        } else {
+            emit Error("Already leased"); revert CustomError("Already leased");
+        }
     }
+
+    uint256 cost = durationDays * l.currentUnitCost;
+    uint256 balBefore = IERC20(l.currentToken).balanceOf(address(this));
+    if (!IERC20(l.currentToken).transferFrom(msg.sender, address(this), cost))
+        { emit Error("Transfer failed"); revert CustomError("Transfer failed"); }
+    if (IERC20(l.currentToken).balanceOf(address(this)) - balBefore < cost)
+        { emit Error("Insufficient transfer"); revert CustomError("Insufficient transfer"); }
+
+    uint256 leaseId = l.agreementCount++;
+    agreements[node][leaseId] = LeaseAgreement(
+        msg.sender, l.currentUnitCost, l.currentToken, durationDays,
+        _now(), 0, cost, false
+    );
+
+    l.active = true;
+    _updateActiveArrays(node, true);
+    emit Subscribed(node, msg.sender, durationDays, leaseId);
+}
 
     function renew(bytes32 node, uint256 renewalDays) external {
         Lease storage l = leases[node];

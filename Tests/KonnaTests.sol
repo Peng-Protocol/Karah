@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.3 (31/10/2025)
+// File Version: 0.0.4 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: Fixed warp() in testEarlyTermination using konna.currentTime().
 // - 31/10/2025: Removed vm_warp; use Konna.warp() for time control.
 // - 29/10/2025: Fixed parser errors (days → durationDays, missing commas).
 // - 29/10/2025: Corrected proposeLease signature.
@@ -79,7 +80,8 @@ contract KonnaTests {
     }
 
     function testEarlyTermination() public {
-    konna.warp(block.timestamp + 3 days);
+    uint256 currentWarpTime = konna.currentTime();
+    konna.warp(currentWarpTime + 3 days);
     uint256 id = _proposeTermination();
     _vote(id, true);
     testers[2].proxyCall(address(konna), abi.encodeWithSignature("executeTermination(uint256)", id));

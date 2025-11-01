@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.5 (31/10/2025)
+// File Version: 0.0.6 (01/11/2025)
 // Changelog Summary:
+// - 01/11/2025: Fixed time warping in tests using karah.currentTime() instead of block.timestamp.
 // - 31/10/2025: Removed vm_warp cheatcodes; use Karah.warp() instead.
 // - 31/10/2025: Warp to exact timestamps before time-sensitive calls.
 // - 29/10/2025: Fixed destructuring, replaced tstore/tload with vm.warp.
@@ -131,8 +132,9 @@ function _getLeaseDetails() internal view returns (
     }
 
     function p2TestNextLease() public {
-    // Warp past first lease expiry
-    karah.warp(block.timestamp + 7 days + 1);
+    // Warp past first lease expiry using contract's current time
+    uint256 currentWarpTime = karah.currentTime();
+    karah.warp(currentWarpTime + 7 days + 1);
     _approveTester(3);
     testers[3].proxyCall(
         address(karah),
@@ -154,7 +156,8 @@ function _getLeaseDetails() internal view returns (
     }
 
     function p2TestWithdraw1() public {
-    karah.warp(block.timestamp + 14 days + 1);
+    uint256 currentWarpTime = karah.currentTime();
+    karah.warp(currentWarpTime + 14 days + 1);
     uint256 balBefore = token.balanceOf(address(testers[0]));
     testers[0].proxyCall(
         address(karah),
@@ -188,7 +191,8 @@ function _getLeaseDetails() internal view returns (
     // **DEV NOTE**: Call `testLease` again to verify 4-token/day rate.
 
     function testReclamation() public {
-    karah.warp(block.timestamp + 30 days);
+    uint256 currentWarpTime = karah.currentTime();
+    karah.warp(currentWarpTime + 30 days);
     testers[0].proxyCall(
         address(karah),
         abi.encodeWithSignature("reclaimName(bytes32)", NODE)
