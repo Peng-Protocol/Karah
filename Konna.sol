@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
 pragma solidity ^0.8.2;
 
-// File Version: 0.0.5 (31/10/2025)
+// File Version: 0.0.7 (02/11/2025)
 // Changelog:
+// - 02/11/2035: Added renewal functions.
+// - 02/11/2025: Fixed proposeLease lease details fetch. 
 // - 31/10/2025: Fixed scaling error in proposeLease 
 // - 31/10/2025: Fixed _now() infinite recursion bug
 // - 31/10/2025: Added time warp system: currentTime, isWarped, warp(), unWarp(), _now().
@@ -17,6 +19,7 @@ interface IKarah {
     function getLeaseDetails(bytes32 node) external view returns (address lessor, address lessee, uint256 unitCost, uint256 daysLeft, address token, uint256 currentUnitCost, address currentToken);
     function subscribe(bytes32 node, uint256 durationDays) external;
     function endLease(bytes32 node) external;
+    function renew(bytes32 node, uint256 renewalDays) external;
 }
 
 interface IERC20b {
@@ -208,7 +211,7 @@ function _refundContributions(uint256 id, uint256 totalRefund) private {
   function proposeLease(bytes32 node, uint256 durationDays, uint256 expiry) external {
         require(isMember(msg.sender), "Not member");
         require(expiry >= _now() + MIN_EXPIRY && expiry <= _now() + MAX_EXPIRY, "Bad expiry");
-        ( , , , , address token, uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
+        ( , , , , , uint256 currentUnitCost, address token) = IKarah(karah).getLeaseDetails(node);
         require(token != address(0), "No terms");
         uint256 total = durationDays * currentUnitCost;  // unitCost is pre-scaled, no decimals multiplication
 
@@ -294,6 +297,75 @@ function executeTermination(uint256 id) external {
     uint256 refund = balAfter - balBefore;
 
     _refundContributions(id, refund);
+    emit ProposalExecuted(id, p.node);
+}
+
+// --- Renewal ---
+
+function proposeRenewal(bytes32 node, uint256 durationDays, uint256 expiry) external {
+    require(isMember(msg.sender), "Not member");
+    require(expiry >= _now() + MIN_EXPIRY && expiry <= _now() + MAX_EXPIRY, "Bad expiry");
+    
+    // Verify we currently lease this node
+    (, address lessee, , , , , ) = IKarah(karah).getLeaseDetails(node);
+    require(lessee == address(this), "Not current lessee");
+    
+    // Get current token for payment
+    (, , , , address token, , ) = IKarah(karah).getLeaseDetails(node);
+    (, , , , , uint256 currentUnitCost, ) = IKarah(karah).getLeaseDetails(node);
+    require(token != address(0), "No active lease");
+    
+    uint256 total = durationDays * currentUnitCost;
+
+    uint256 id = proposalCount++;
+    proposals[id] = Proposal(msg.sender, node, bytes32(0), address(0), address(0), 0, 0, expiry, false);
+    leaseProps[id] = LeaseProposal(total, 0, token, durationDays);
+    emit ProposalCreated(id, msg.sender, node, expiry);
+}
+
+function voteRenewal(uint256 id, bool inFavor, uint256 amount) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && _now() < p.expiry, "Invalid state");
+    require(isMember(msg.sender), "Not member");
+    require(!voted[id][msg.sender], "Voted");
+
+    LeaseProposal storage lp = leaseProps[id];
+    uint256 stillNeeded = lp.totalNeeded > lp.collected ? lp.totalNeeded - lp.collected : 0;
+    uint256 pull = amount > stillNeeded ? stillNeeded : amount;
+    
+    if (pull > 0) {
+        uint256 balBefore = IERC20b(lp.token).balanceOf(address(this));
+        require(IERC20b(lp.token).transferFrom(msg.sender, address(this), pull), "Xfer fail");
+        require(IERC20b(lp.token).balanceOf(address(this)) - balBefore >= pull, "Low xfer");
+        lp.collected += pull;
+        contributions[id][msg.sender] += pull; // Add to existing contributions
+    }
+    
+    voted[id][msg.sender] = true;
+    if (inFavor) p.votesFor++;
+    emit Voted(id, msg.sender, inFavor);
+}
+
+function executeRenewal(uint256 id) external {
+    Proposal storage p = proposals[id];
+    require(!p.executed && _now() < p.expiry, "Invalid");
+    require(p.votesFor > members.length / 2, "No quorum");
+    
+    LeaseProposal memory lp = leaseProps[id];
+    require(lp.collected >= lp.totalNeeded, "Underfunded");
+    
+    // Verify we still have the lease
+    (, address lessee, , , , , ) = IKarah(karah).getLeaseDetails(p.node);
+    require(lessee == address(this), "Lost lease");
+    
+    p.executed = true;
+
+    // Approve Karah to pull renewal funds
+    require(IERC20b(lp.token).approve(karah, lp.totalNeeded), "Approve fail");
+
+    // Karah pulls via transferFrom
+    IKarah(karah).renew(p.node, lp.durationDays);
+
     emit ProposalExecuted(id, p.node);
 }
 }

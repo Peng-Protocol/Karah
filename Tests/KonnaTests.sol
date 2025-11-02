@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BSL 1.1 - Peng Protocol 2025
-// File Version: 0.0.4 (01/11/2025)
-// Changelog Summary:
+// File Version: 0.0.8 (02/11/2025)
+// Changelog:
+// - 02/11/2025: Adjusted renewal timing to account for warp. 
+// - 02/11/2025: Adjusted renewal to match test path.
+// - 02/11/2025: Warp Karah in testEarlyTermination (time source for lease math).
+// - 02/11/2025: Adjusted proposal expiry time to match Konna.sol expectations 
 // - 01/11/2025: Fixed warp() in testEarlyTermination using konna.currentTime().
 // - 31/10/2025: Removed vm_warp; use Konna.warp() for time control.
 // - 29/10/2025: Fixed parser errors (days → durationDays, missing commas).
@@ -80,23 +84,76 @@ contract KonnaTests {
     }
 
     function testEarlyTermination() public {
-    uint256 currentWarpTime = konna.currentTime();
-    konna.warp(currentWarpTime + 3 days);
-    uint256 id = _proposeTermination();
-    _vote(id, true);
-    testers[2].proxyCall(address(konna), abi.encodeWithSignature("executeTermination(uint256)", id));
-    (,address lessee,,,,,,) = karah.getLeaseDetails(NODE);
-    require(lessee == address(0));
-}
+        // 1. Define the future time
+        uint256 warpTime = block.timestamp + 3 days;
 
-    // **DEV NOTE**: Call `testLease` again to verify new lease after termination.
+        // 2. Warp BOTH contracts to the same future time.
+        // Warp Karah (for lease math)
+        karah.warp(warpTime);
+        // Warp Konna (for proposal expiry math) - using testers[1] (the owner)
+        testers[1].proxyCall(address(konna), abi.encodeWithSignature("warp(uint256)", warpTime));
+
+        // 3. Propose, vote, and execute in the "future"
+        uint256 id = _proposeTermination();
+        _vote(id, true);
+        testers[2].proxyCall(address(konna), abi.encodeWithSignature("executeTermination(uint256)", id));
+        
+        (,address lessee,,,,,,) = karah.getLeaseDetails(NODE);
+        require(lessee == address(0));
+    }
 
     function testRenew() public {
+    _approveAll();
+    
+    // 1. Create initial 7-day lease
     uint256 id = _proposeLease(7);
     _voteLease(id, true, 7e18);
     testers[2].proxyCall(address(konna), abi.encodeWithSignature("executeAcquisition(uint256)", id));
+    
+    // Verify initial lease: 7 days
     (, , , uint256 daysLeft, , , , ) = karah.getLeaseDetails(NODE);
-    require(daysLeft == 14);
+    require(daysLeft == 7, "Initial lease should be 7 days");
+    
+    // 2. Warp time forward by 3 days
+    uint256 warpTime = block.timestamp + 3 days;
+    karah.warp(warpTime);
+    testers[1].proxyCall(address(konna), abi.encodeWithSignature("warp(uint256)", warpTime));
+    
+    // 3. Now 4 days should remain
+    (, , , daysLeft, , , , ) = karah.getLeaseDetails(NODE);
+    require(daysLeft == 4, "After 3 days, 4 days should remain");
+    
+    // 4. Propose RENEWAL of 7 days
+    uint256 renewalId = _proposeRenewal(7);
+    _voteRenewal(renewalId, true, 7e18);
+    testers[2].proxyCall(address(konna), abi.encodeWithSignature("executeRenewal(uint256)", renewalId));
+    
+    // 5. Verify: 4 + 7 = 11 days remaining
+    (, , , daysLeft, , , , ) = karah.getLeaseDetails(NODE);
+    require(daysLeft == 11, "After renewal, should have 11 days");
+}
+
+// New helper for renewal proposals
+
+function _getCurrentTime() internal view returns (uint256) {
+    return konna.isWarped() ? konna.currentTime() : block.timestamp;
+}
+
+function _proposeRenewal(uint256 durationDays) internal returns (uint256 id) {
+    uint256 expiryTime = _getCurrentTime() + 7 days;
+    testers[2].proxyCall(
+        address(konna),
+        abi.encodeWithSignature(
+            "proposeRenewal(bytes32,uint256,uint256)",
+            NODE, durationDays, expiryTime
+        )
+    );
+    return konna.proposalCount() - 1;
+}
+
+function _voteRenewal(uint256 id, bool favor, uint256 amt) internal {
+    testers[2].proxyCall(address(konna), abi.encodeWithSignature("voteRenewal(uint256,bool,uint256)", id, favor, amt));
+    testers[3].proxyCall(address(konna), abi.encodeWithSignature("voteRenewal(uint256,bool,uint256)", id, favor, amt));
 }
 
     // Helpers
@@ -107,41 +164,44 @@ contract KonnaTests {
     }
 
     function _proposeLease(uint256 durationDays) internal returns (uint256 id) {
+    uint256 expiryTime = _getCurrentTime() + 7 days;
     testers[2].proxyCall(
         address(konna),
         abi.encodeWithSignature(
             "proposeLease(bytes32,uint256,uint256)",
-            NODE, durationDays, block.timestamp + 3 days
+            NODE, durationDays, expiryTime
         )
     );
     return konna.proposalCount() - 1;
 }
 
     function _voteLease(uint256 id, bool favor, uint256 amt) internal {
-        testers[2].proxyCall(address(konna), abi.encodeWithSignature("voteLease(uint256,bool,uint256)", id, favor, amt));
-        testers[3].proxyCall(address(konna), abi.encodeWithSignature("voteLease(uint256,bool,uint256)", id, favor, amt));
-    }
+    testers[2].proxyCall(address(konna), abi.encodeWithSignature("voteLease(uint256,bool,uint256)", id, favor, amt));
+    testers[3].proxyCall(address(konna), abi.encodeWithSignature("voteLease(uint256,bool,uint256)", id, favor, amt));
+}
 
     function _proposeChange(bytes32 label, address sub, address res, uint64 ttl) internal returns (uint256 id) {
+    uint256 expiryTime = _getCurrentTime() + 7 days;
     testers[2].proxyCall(
         address(konna),
         abi.encodeWithSignature(
             "proposeChange(bytes32,bytes32,address,address,uint64,uint256)",
-            NODE, label, sub, res, ttl, block.timestamp + 3 days
+            NODE, label, sub, res, ttl, expiryTime
         )
     );
     return konna.proposalCount() - 1;
 }
 
     function _vote(uint256 id, bool favor) internal {
-        testers[2].proxyCall(address(konna), abi.encodeWithSignature("vote(uint256,bool)", id, favor));
-        testers[3].proxyCall(address(konna), abi.encodeWithSignature("vote(uint256,bool)", id, favor));
-    }
+    testers[2].proxyCall(address(konna), abi.encodeWithSignature("vote(uint256,bool)", id, favor));
+    testers[3].proxyCall(address(konna), abi.encodeWithSignature("vote(uint256,bool)", id, favor));
+}
 
     function _proposeTermination() internal returns (uint256 id) {
+    uint256 expiryTime = _getCurrentTime() + 7 days;
     testers[2].proxyCall(
         address(konna),
-        abi.encodeWithSignature("proposeTermination(bytes32,uint256)", NODE, block.timestamp + 3 days)
+        abi.encodeWithSignature("proposeTermination(bytes32,uint256)", NODE, expiryTime)
     );
     return konna.proposalCount() - 1;
 }

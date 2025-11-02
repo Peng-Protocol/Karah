@@ -15,11 +15,11 @@
 7. Call `addParticipants()`.
 8. Call `testMint()`.
 9. Call `testTerms()`.
+  - **@Dev**: During second round skip to #13. 
 10. Call `testLease()`.
 11. Call `testContentMod()`.
 12. Call `testEarlyTermination()`.
-    - **DEV NOTE**: Call `testLease` again to start new lease.
-13. Call `testRenew()`:
+13. Call `testRenew()`. 
     
 ## Objectives
 6. `deployTesters()`:
@@ -45,8 +45,8 @@
     - **Looking For**: Lease ended, `lessee == address(0)`, refund issued.
     - **DEV NOTE**: Call `testLease` again to start new lease.
 13. `testRenew()`:
-    - **Objective**: New lease proposal for 7 days → vote → execute → extends to 14 days.
-    - **Looking For**: `daysLeft == 14`.
+    - **Objective**: New lease proposal for 7 days → vote → execute → time skip 3 days → extend lease by 7 days.
+    - **Looking For**: `daysLeft == 11`.
 
 ## Notes
 - All DAO actions require **2/3 member votes** (quorum).
